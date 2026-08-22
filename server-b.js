@@ -2,7 +2,7 @@ import { startVoiceServer } from './voice-runtime.js';
 
 startVoiceServer({
   name: 'Call 2',
-  port: Number(process.env.PORT_B || 3002),
+  port: Number(process.env.PORT || process.env.PORT_B || 3002),
   mediaPath: '/media',
   sttLanguageCode: 'auto',
   sttMode: 'translate',

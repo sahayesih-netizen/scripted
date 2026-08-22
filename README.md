@@ -43,6 +43,8 @@ To run the second variant:
 npm run start:b
 ```
 
+For Railway, set `APP_ENTRY` to `server-a.js` or `server-b.js` and use `npm start`.
+
 ## Start a call
 
 Send a POST request to `/call` on the script you started:
@@ -64,3 +66,4 @@ For the second script, use `3002` instead.
 - Twilio connects to `/twiml`, then opens a WebSocket at `/media`.
 - Sarvam STT uses `saaras:v3-realtime` with `mode=translate` and `stream_type=fast`.
 - Sarvam TTS uses `bulbul:v3` with `output_audio_codec=mulaw` so the audio can be sent straight back to Twilio.
+- Railway needs `APP_ENTRY` because Railpack only auto-detects one start command.

@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "start": "node start.js",
     "start:a": "node server-a.js",
     "start:b": "node server-b.js"
   },
