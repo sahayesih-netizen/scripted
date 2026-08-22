@@ -1,10 +1,28 @@
 import 'dotenv/config';
 import express from 'express';
 import http from 'http';
+import crypto from 'crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import twilio from 'twilio';
 
 const { twiml } = twilio;
+
+function now() {
+  return new Date().toISOString();
+}
+
+function log(scope, message, meta) {
+  if (meta === undefined) {
+    console.log(`[${now()}] [${scope}] ${message}`);
+    return;
+  }
+
+  console.log(`[${now()}] [${scope}] ${message}`, meta);
+}
+
+function errorLog(scope, message, error) {
+  console.error(`[${now()}] [${scope}] ${message}`, error);
+}
 
 function requireEnv(name) {
   const value = process.env[name];
@@ -24,6 +42,14 @@ function normalizeText(text = '') {
     .replace(/[^\p{L}\p{N}\s']/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function safePreview(text, limit = 140) {
+  if (!text) {
+    return '';
+  }
+
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
 }
 
 function toWsUrl(baseUrl, path) {
@@ -84,6 +110,14 @@ function buildTextToSpeechRequestBody(response) {
 async function synthesizeSpeech(response) {
   const apiKey = requireEnv('SARVAM_API_KEY');
 
+  log('tts', 'requesting speech', {
+    languageCode: response.languageCode,
+    speaker: response.speaker,
+    pace: response.pace,
+    temperature: response.temperature,
+    text: safePreview(response.text)
+  });
+
   const result = await fetch('https://api.sarvam.ai/text-to-speech', {
     method: 'POST',
     headers: {
@@ -97,7 +131,9 @@ async function synthesizeSpeech(response) {
     throw new Error(`Sarvam TTS failed: ${result.status}`);
   }
 
-  return toBase64Audio(await result.json());
+  const json = await result.json();
+  log('tts', 'speech generated', { audioCount: json?.audios?.length || 0 });
+  return toBase64Audio(json);
 }
 
 function connectToSarvamStt(session, profile, onFinalTranscript, onPartialTranscript) {
@@ -114,6 +150,12 @@ function connectToSarvamStt(session, profile, onFinalTranscript, onPartialTransc
   url.searchParams.set('silence_duration_ms', String(profile.silenceDurationMs ?? 400));
   url.searchParams.set('min_speech_duration_ms', String(profile.minSpeechDurationMs ?? 120));
 
+  log(session.scope, 'connecting to Sarvam STT', {
+    url: url.toString(),
+    mode: profile.sttMode || 'translate',
+    streamType: profile.streamType || 'fast'
+  });
+
   const stt = new WebSocket(url, {
     headers: {
       'api-subscription-key': apiKey
@@ -122,6 +164,7 @@ function connectToSarvamStt(session, profile, onFinalTranscript, onPartialTransc
 
   stt.on('open', () => {
     session.sttReady = true;
+    log(session.scope, 'Sarvam STT socket open');
   });
 
   stt.on('message', (data) => {
@@ -132,7 +175,18 @@ function connectToSarvamStt(session, profile, onFinalTranscript, onPartialTransc
       return;
     }
 
+    if (message.event === 'session.begin') {
+      log(session.scope, 'Sarvam STT session began', message);
+      return;
+    }
+
+    if (message.event === 'vad.speech_start' || message.event === 'vad.speech_end') {
+      log(session.scope, `Sarvam STT ${message.event}`);
+      return;
+    }
+
     if (message.event === 'transcript.partial') {
+      log(session.scope, 'Sarvam partial transcript', { text: safePreview(message.text || '') });
       if (typeof onPartialTranscript === 'function') {
         onPartialTranscript(message.text || '');
       }
@@ -140,23 +194,32 @@ function connectToSarvamStt(session, profile, onFinalTranscript, onPartialTransc
     }
 
     if (message.event === 'transcript.final') {
+      log(session.scope, 'Sarvam final transcript', { text: safePreview(message.text || '') });
       onFinalTranscript(message.text || '');
+      return;
+    }
+
+    if (message.event === 'error') {
+      errorLog(session.scope, 'Sarvam STT error event', message);
     }
   });
 
   stt.on('close', () => {
     session.sttReady = false;
+    log(session.scope, 'Sarvam STT socket closed');
   });
 
   stt.on('error', (error) => {
-    console.error(`[${profile.name}] Sarvam STT error:`, error.message);
+    errorLog(session.scope, 'Sarvam STT socket error', error.message);
   });
 
   return stt;
 }
 
 function createSpeechSession(ws, profile, streamSid) {
+  const sessionId = crypto.randomUUID().slice(0, 8);
   const session = {
+    scope: `${profile.name}:${sessionId}`,
     streamSid,
     sttReady: false,
     currentSpeechToken: 0,
@@ -164,8 +227,14 @@ function createSpeechSession(ws, profile, streamSid) {
     memory: profile.createMemory ? profile.createMemory() : {}
   };
 
+  log(session.scope, 'session created', { initialStreamSid: streamSid || null });
+
   const sendMediaChunk = (chunk) => {
     if (ws.readyState !== WebSocket.OPEN || !session.streamSid) {
+      log(session.scope, 'skipping outbound audio chunk', {
+        wsReadyState: ws.readyState,
+        streamSid: session.streamSid || null
+      });
       return;
     }
 
@@ -174,20 +243,25 @@ function createSpeechSession(ws, profile, streamSid) {
       streamSid: session.streamSid,
       media: { payload: chunk.toString('base64') }
     }));
+    log(session.scope, 'sent outbound audio chunk', { bytes: chunk.length });
   };
 
   const stopSpeech = () => {
     session.currentSpeechToken += 1;
+    log(session.scope, 'speech token advanced', { token: session.currentSpeechToken });
   };
 
   const speak = async (response, token) => {
+    log(session.scope, 'speaking response', { text: safePreview(response.text) });
     const audio = await synthesizeSpeech(response);
     if (token !== session.currentSpeechToken) {
+      log(session.scope, 'speech cancelled before playback');
       return;
     }
 
     for (const chunk of chunkBuffer(audio, 160)) {
       if (token !== session.currentSpeechToken) {
+        log(session.scope, 'speech cancelled mid playback');
         return;
       }
 
@@ -198,16 +272,19 @@ function createSpeechSession(ws, profile, streamSid) {
 
   const enqueueResponses = (responses) => {
     if (!responses || responses.length === 0) {
+      log(session.scope, 'no responses queued');
       return;
     }
 
     session.currentSpeechToken += 1;
     const token = session.currentSpeechToken;
+    log(session.scope, 'queueing responses', { count: responses.length, token });
 
     session.playbackQueue = session.playbackQueue
       .then(async () => {
         for (const response of responses) {
           if (token !== session.currentSpeechToken) {
+            log(session.scope, 'response queue cancelled before next item');
             return;
           }
 
@@ -215,7 +292,7 @@ function createSpeechSession(ws, profile, streamSid) {
         }
       })
       .catch((error) => {
-        console.error(`[${profile.name}] Speech playback failed:`, error.message);
+        errorLog(session.scope, 'Speech playback failed', error.message);
       });
 
     return session.playbackQueue;
@@ -224,8 +301,11 @@ function createSpeechSession(ws, profile, streamSid) {
   const handleTranscript = (text) => {
     const normalized = normalizeText(text);
     if (!normalized) {
+      log(session.scope, 'ignored empty transcript');
       return;
     }
+
+    log(session.scope, 'handling transcript', { text: safePreview(text), normalized: safePreview(normalized) });
 
     const responses = profile.matchTranscript({
       text,
@@ -236,12 +316,16 @@ function createSpeechSession(ws, profile, streamSid) {
     });
 
     if (responses && responses.length > 0) {
+      log(session.scope, 'matched response(s)', { count: responses.length });
       enqueueResponses(responses);
+    } else {
+      log(session.scope, 'no scripted match for transcript');
     }
   };
 
   const stt = connectToSarvamStt(session, profile, handleTranscript, () => {
     if (session.currentSpeechToken > 0) {
+      log(session.scope, 'barge-in detected, stopping speech');
       stopSpeech();
     }
   });
@@ -254,20 +338,38 @@ function createSpeechSession(ws, profile, streamSid) {
       return;
     }
 
+    log(session.scope, 'received Twilio websocket event', {
+      event: message.event,
+      streamSid: message.streamSid || message.start?.streamSid || null,
+      payloadBytes: message.media?.payload ? message.media.payload.length : 0
+    });
+
     switch (message.event) {
       case 'start':
         session.streamSid = message.start?.streamSid || session.streamSid;
+        log(session.scope, 'Twilio stream started', {
+          callSid: message.start?.callSid || null,
+          streamSid: session.streamSid || null,
+          customParameters: message.start?.customParameters || null
+        });
         enqueueResponses(profile.initialResponses({ memory: session.memory, formatNumberWord }));
         break;
       case 'media':
         if (message.media?.payload && stt.readyState === WebSocket.OPEN) {
+          log(session.scope, 'forwarding media to Sarvam STT', { bytes: message.media.payload.length });
           stt.send(JSON.stringify({
             event: 'audio_input',
             audio: message.media.payload
           }));
+        } else {
+          log(session.scope, 'skipped forwarding media', {
+            hasPayload: Boolean(message.media?.payload),
+            sttReadyState: stt.readyState
+          });
         }
         break;
       case 'stop':
+        log(session.scope, 'Twilio stream stopped');
         stopSpeech();
         stt.close();
         ws.close();
@@ -278,12 +380,13 @@ function createSpeechSession(ws, profile, streamSid) {
   });
 
   ws.on('close', () => {
+    log(session.scope, 'Twilio websocket closed');
     stopSpeech();
     stt.close();
   });
 
   ws.on('error', (error) => {
-    console.error(`[${profile.name}] Twilio websocket error:`, error.message);
+    errorLog(session.scope, 'Twilio websocket error', error.message);
   });
 }
 
@@ -295,9 +398,17 @@ export function startVoiceServer(profile) {
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: profile.mediaPath || '/media' });
 
+  log(profile.name, 'server booting', {
+    port: profile.port,
+    mediaPath: profile.mediaPath || '/media',
+    sttLanguageCode: profile.sttLanguageCode || 'auto',
+    sttMode: profile.sttMode || 'translate'
+  });
+
   app.post('/call', async (req, res) => {
     try {
       const to = req.body.to;
+      log(profile.name, '/call request received', { to: to || null });
       if (!to) {
         return res.status(400).json({ error: 'Missing "to" number' });
       }
@@ -312,15 +423,24 @@ export function startVoiceServer(profile) {
         method: 'POST'
       });
 
+      log(profile.name, 'outbound call created', { callSid: call.sid, status: call.status, to, from });
+
       res.json({ callSid: call.sid, status: call.status });
     } catch (error) {
+      errorLog(profile.name, '/call failed', error);
       res.status(500).json({ error: error.message });
     }
   });
 
-  app.post('/twiml', (_req, res) => {
+  app.post('/twiml', (req, res) => {
     const publicUrl = requireEnv('PUBLIC_BASE_URL');
     const wsUrl = toWsUrl(publicUrl, profile.mediaPath || '/media');
+    log(profile.name, '/twiml requested', {
+      from: req.body.From || null,
+      to: req.body.To || null,
+      callSid: req.body.CallSid || null,
+      wsUrl
+    });
     const response = new twiml.VoiceResponse();
     const connect = response.connect();
     connect.stream({ url: wsUrl });
@@ -328,15 +448,21 @@ export function startVoiceServer(profile) {
   });
 
   app.get('/health', (_req, res) => {
+    log(profile.name, '/health requested');
     res.json({ ok: true, name: profile.name });
   });
 
   wss.on('connection', (ws) => {
+    log(profile.name, 'Twilio websocket connected');
     createSpeechSession(ws, profile);
   });
 
+  wss.on('error', (error) => {
+    errorLog(profile.name, 'WebSocket server error', error);
+  });
+
   server.listen(profile.port, () => {
-    console.log(`${profile.name} listening on http://localhost:${profile.port}`);
-    console.log(`Twilio will connect to ${toWsUrl(requireEnv('PUBLIC_BASE_URL'), profile.mediaPath || '/media')}`);
+    log(profile.name, 'listening', { url: `http://localhost:${profile.port}` });
+    log(profile.name, 'expected Twilio media url', { url: toWsUrl(requireEnv('PUBLIC_BASE_URL'), profile.mediaPath || '/media') });
   });
 }
