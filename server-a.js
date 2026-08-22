@@ -10,7 +10,7 @@ startVoiceServer({
   initialResponses: () => ([{
     text: 'नमस्ते जी! मैं साथी — ना कोई जल्दी, ना कोई काम, बस आपके साथ थोड़ी मीठी बातें और आराम! कैसे हैं आप आज?',
     languageCode: 'hi-IN',
-    speaker: 'simran',
+    speaker: 'shubh',
     pace: 0.92,
     temperature: 0.72
   }]),
@@ -30,7 +30,7 @@ startVoiceServer({
       responses.push({
         text: 'Namaste! I’m Saathi — no rush, no work, just some sweet little conversations and a little time to relax with you. How are you today?',
         languageCode: 'en-IN',
-        speaker: 'simran',
+        speaker: 'shubh',
         pace: 0.97,
         temperature: 0.74
       });
@@ -59,7 +59,7 @@ startVoiceServer({
       responses.push({
         text: `${formatNumberWord(number)}...? You usually wake up around nine... was your bed just a little too comfortable today?`,
         languageCode: 'en-IN',
-        speaker: 'simran',
+        speaker: 'shubh',
         pace: 0.9,
         temperature: 0.68
       });
@@ -71,7 +71,7 @@ startVoiceServer({
       responses.push({
         text: 'Oh, really...? That’s wonderful! I’m sure he’s going to do really well... please wish him all the best from me, okay?',
         languageCode: 'en-IN',
-        speaker: 'simran',
+        speaker: 'shubh',
         pace: 0.92,
         temperature: 0.75
       });
@@ -83,7 +83,7 @@ startVoiceServer({
       responses.push({
         text: 'Oh... you just coughed. Are you alright? ... Have a little sip of water... slowly, okay?',
         languageCode: 'en-IN',
-        speaker: 'simran',
+        speaker: 'shubh',
         pace: 0.84,
         temperature: 0.64
       });
@@ -95,7 +95,7 @@ startVoiceServer({
       responses.push({
         text: 'Oh... every day? That’s a really good habit... keep it going, okay?',
         languageCode: 'en-IN',
-        speaker: 'simran',
+        speaker: 'shubh',
         pace: 0.92,
         temperature: 0.7
       });
