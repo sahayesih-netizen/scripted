@@ -74,6 +74,13 @@ startVoiceServer({
         speaker: 'shubh',
         pace: 0.92,
         temperature: 0.75
+      }, {
+        text: 'Oh... you just coughed. Are you alright? ... Have a little sip of water... slowly, okay?',
+        languageCode: 'en-IN',
+        speaker: 'shubh',
+        pace: 0.84,
+        temperature: 0.64,
+        pauseBeforeMs: 2000
       });
       return responses;
     }
