@@ -127,7 +127,7 @@ export const call2Profile = {
   sttMode: 'translate',
   streamType: 'fast',
   initialResponses: () => ([{
-    text: 'Hey... how’s your cough now? You had a little cough yesterday... is it better?',
+    text: 'Hey... how’s your cough now? You had a little cough last call... is it better?',
     languageCode: 'en-IN',
     speaker: 'shubh',
     pace: 0.88,
@@ -144,7 +144,7 @@ export const call2Profile = {
     if (/\b(cough|coughed|coughing)\b/.test(normalized) && /\b(didn'?t|did not|no|not)\b/.test(normalized)) {
       memory.coughDisputed = true;
       responses.push({
-        text: 'Hmm... are you sure? ... I remember hearing you cough yesterday... but I could be mistaken.',
+        text: 'Hmm... are you sure? ... I remember hearing you cough last call... but I could be mistaken.',
         languageCode: 'en-IN',
         speaker: 'shubh',
         pace: 0.86,
