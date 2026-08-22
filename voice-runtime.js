@@ -436,27 +436,70 @@ function createSpeechSession(ws, profile, streamSid) {
   });
 }
 
-export function startVoiceServer(profile) {
+function normalizeScriptKey(key, fallback = 'a') {
+  if (!key) {
+    return fallback;
+  }
+
+  return String(key).trim().toLowerCase();
+}
+
+function readScriptKeyFromRequest(req, fallback = 'a') {
+  return normalizeScriptKey(req.params?.script || req.query?.script || req.body?.script, fallback);
+}
+
+function readScriptKeyFromWsUrl(rawUrl, fallback = 'a') {
+  try {
+    const url = new URL(rawUrl, 'http://localhost');
+    const parts = url.pathname.split('/').filter(Boolean);
+
+    if (parts[0] === 'media' && parts[1]) {
+      return normalizeScriptKey(parts[1], fallback);
+    }
+
+    return normalizeScriptKey(url.searchParams.get('script'), fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+function startVoiceServerWithResolver({
+  serviceName,
+  getProfile,
+  defaultScriptKey = 'a',
+  listenPort = Number(process.env.PORT || 3000),
+  allowScriptSelection = false,
+  availableScriptKeys = [defaultScriptKey]
+}) {
   const app = express();
   app.use(express.urlencoded({ extended: false }));
   app.use(express.json());
 
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: profile.mediaPath || '/media' });
+  const wss = new WebSocketServer({ server });
 
-  log(profile.name, 'server booting', {
-    port: profile.port,
-    mediaPath: profile.mediaPath || '/media',
-    sttLanguageCode: profile.sttLanguageCode || 'auto',
-    sttMode: profile.sttMode || 'translate'
+  log(serviceName, 'server booting', {
+    port: listenPort,
+    defaultScriptKey,
+    allowScriptSelection
   });
 
-  app.post('/call', async (req, res) => {
+  const resolveProfile = (scriptKey) => getProfile(normalizeScriptKey(scriptKey, defaultScriptKey));
+
+  app.post(['/call', '/call/:script'], async (req, res) => {
     try {
       const to = req.body.to;
-      log(profile.name, '/call request received', { to: to || null });
+      const scriptKey = allowScriptSelection ? readScriptKeyFromRequest(req, defaultScriptKey) : defaultScriptKey;
+      const profile = resolveProfile(scriptKey);
+
+      log(serviceName, '/call request received', { to: to || null, scriptKey });
+
       if (!to) {
         return res.status(400).json({ error: 'Missing "to" number' });
+      }
+
+      if (!profile) {
+        return res.status(404).json({ error: `Unknown script: ${scriptKey}` });
       }
 
       const from = requireEnv('TWILIO_PHONE_NUMBER');
@@ -465,23 +508,31 @@ export function startVoiceServer(profile) {
       const call = await twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN).calls.create({
         to,
         from,
-        url: new URL('/twiml', publicUrl).toString(),
+        url: new URL(`/twiml/${scriptKey}`, publicUrl).toString(),
         method: 'POST'
       });
 
-      log(profile.name, 'outbound call created', { callSid: call.sid, status: call.status, to, from });
+      log(serviceName, 'outbound call created', { callSid: call.sid, status: call.status, to, from, scriptKey });
 
-      res.json({ callSid: call.sid, status: call.status });
+      res.json({ callSid: call.sid, status: call.status, script: scriptKey });
     } catch (error) {
-      errorLog(profile.name, '/call failed', error);
+      errorLog(serviceName, '/call failed', error);
       res.status(500).json({ error: error.message });
     }
   });
 
-  app.post('/twiml', (req, res) => {
+  app.post(['/twiml', '/twiml/:script'], (req, res) => {
+    const scriptKey = allowScriptSelection ? readScriptKeyFromRequest(req, defaultScriptKey) : defaultScriptKey;
+    const profile = resolveProfile(scriptKey);
+
+    if (!profile) {
+      return res.status(404).send(`Unknown script: ${scriptKey}`);
+    }
+
     const publicUrl = requireEnv('PUBLIC_BASE_URL');
-    const wsUrl = toWsUrl(publicUrl, profile.mediaPath || '/media');
-    log(profile.name, '/twiml requested', {
+    const wsUrl = toWsUrl(publicUrl, `/media/${scriptKey}`);
+    log(serviceName, '/twiml requested', {
+      scriptKey,
       from: req.body.From || null,
       to: req.body.To || null,
       callSid: req.body.CallSid || null,
@@ -494,21 +545,51 @@ export function startVoiceServer(profile) {
   });
 
   app.get('/health', (_req, res) => {
-    log(profile.name, '/health requested');
-    res.json({ ok: true, name: profile.name });
+    log(serviceName, '/health requested');
+    res.json({ ok: true, scripts: availableScriptKeys });
   });
 
-  wss.on('connection', (ws) => {
-    log(profile.name, 'Twilio websocket connected');
+  wss.on('connection', (ws, request) => {
+    const scriptKey = allowScriptSelection ? readScriptKeyFromWsUrl(request.url || '', defaultScriptKey) : defaultScriptKey;
+    const profile = resolveProfile(scriptKey);
+
+    if (!profile) {
+      errorLog(serviceName, 'WebSocket connection rejected for unknown script', { scriptKey, url: request.url });
+      ws.close();
+      return;
+    }
+
+    log(serviceName, 'Twilio websocket connected', { scriptKey });
     createSpeechSession(ws, profile);
   });
 
   wss.on('error', (error) => {
-    errorLog(profile.name, 'WebSocket server error', error);
+    errorLog(serviceName, 'WebSocket server error', error);
   });
 
-  server.listen(profile.port, () => {
-    log(profile.name, 'listening', { url: `http://localhost:${profile.port}` });
-    log(profile.name, 'expected Twilio media url', { url: toWsUrl(requireEnv('PUBLIC_BASE_URL'), profile.mediaPath || '/media') });
+  server.listen(listenPort, () => {
+    log(serviceName, 'listening', { url: `http://localhost:${listenPort}` });
+  });
+}
+
+export function startVoiceServer(profile) {
+  const scriptKey = profile.key || 'a';
+  startVoiceServerWithResolver({
+    serviceName: profile.name || 'voice',
+    defaultScriptKey: scriptKey,
+    listenPort: profile.port || profile.defaultPort || Number(process.env.PORT || 3000),
+    allowScriptSelection: false,
+    getProfile: () => profile
+  });
+}
+
+export function startMultiVoiceServer(profilesByKey) {
+  startVoiceServerWithResolver({
+    serviceName: 'combined-voice',
+    defaultScriptKey: 'a',
+    listenPort: Number(process.env.PORT || 3000),
+    allowScriptSelection: true,
+    availableScriptKeys: Object.keys(profilesByKey),
+    getProfile: (scriptKey) => profilesByKey[scriptKey] || null
   });
 }

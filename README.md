@@ -1,6 +1,6 @@
 # Voice Call Bot
 
-This is a minimal outbound call bot with two separate dialogue variants:
+This is a minimal outbound call bot with two dialogue variants behind one service:
 
 1. Your server places a phone call.
 2. Twilio streams the callee's speech over WebSocket.
@@ -26,34 +26,32 @@ Create environment variables:
 - `SARVAM_API_KEY` if needed by your Sarvam endpoint
 - `PORT_A` and `PORT_B` if you want to override the default ports
 
-`PUBLIC_BASE_URL` must be a public URL such as an ngrok tunnel.
-Use one tunnel per script, and point `PUBLIC_BASE_URL` at the matching tunnel URL.
+`PUBLIC_BASE_URL` must be a public URL such as an ngrok tunnel or Railway domain.
 
 You can copy `.env.example` to `.env` and fill in the values.
 
 ## Run
 
 ```bash
-npm run start:a
+npm start
 ```
 
-To run the second variant:
+For the separate local variants:
 
 ```bash
+npm run start:a
 npm run start:b
 ```
 
-For Railway, set `APP_ENTRY` to `server-a.js` or `server-b.js` and use `npm start`.
-
 ## Start a call
 
-Send a POST request to `/call` on the script you started:
+Send a POST request to `/call` and pass `script=a` or `script=b`:
 
 ```bash
-curl -X POST http://localhost:3001/call -H "Content-Type: application/json" -d "{\"to\":\"+1234567890\"}"
+curl -X POST http://localhost:3000/call -H "Content-Type: application/json" -d "{\"to\":\"+1234567890\",\"script\":\"a\"}"
 ```
 
-For the second script, use `3002` instead.
+Use `script=b` for the second flow.
 
 ## Voice flow
 
@@ -63,7 +61,7 @@ For the second script, use `3002` instead.
 
 ## Notes
 
-- Twilio connects to `/twiml`, then opens a WebSocket at `/media`.
+- Twilio connects to `/twiml/a` or `/twiml/b`, then opens a WebSocket at `/media/a` or `/media/b`.
 - Sarvam STT uses `saaras:v3-realtime` with `mode=translate` and `stream_type=fast`.
 - Sarvam TTS uses `bulbul:v3` with `output_audio_codec=mulaw` so the audio can be sent straight back to Twilio.
-- Railway needs `APP_ENTRY` because Railpack only auto-detects one start command.
+- Railway can run the combined service with `npm start`.
