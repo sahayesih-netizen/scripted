@@ -94,6 +94,28 @@ function toBase64Audio(response) {
   return Buffer.from(audio, 'base64');
 }
 
+function extractWavPayload(buffer) {
+  if (buffer.length < 44 || buffer.toString('ascii', 0, 4) !== 'RIFF' || buffer.toString('ascii', 8, 12) !== 'WAVE') {
+    return buffer;
+  }
+
+  let offset = 12;
+  while (offset + 8 <= buffer.length) {
+    const chunkId = buffer.toString('ascii', offset, offset + 4);
+    const chunkSize = buffer.readUInt32LE(offset + 4);
+    const chunkDataStart = offset + 8;
+    const chunkDataEnd = chunkDataStart + chunkSize;
+
+    if (chunkId === 'data') {
+      return buffer.subarray(chunkDataStart, chunkDataEnd);
+    }
+
+    offset = chunkDataEnd + (chunkSize % 2);
+  }
+
+  return buffer;
+}
+
 function buildTextToSpeechRequestBody(response) {
   return {
     text: response.text,
@@ -132,8 +154,15 @@ async function synthesizeSpeech(response) {
   }
 
   const json = await result.json();
-  log('tts', 'speech generated', { audioCount: json?.audios?.length || 0 });
-  return toBase64Audio(json);
+  const wav = toBase64Audio(json);
+  const payload = extractWavPayload(wav);
+  log('tts', 'speech generated', {
+    audioCount: json?.audios?.length || 0,
+    wavBytes: wav.length,
+    payloadBytes: payload.length,
+    strippedWavHeader: payload.length !== wav.length
+  });
+  return payload;
 }
 
 function connectToSarvamStt(session, profile, onFinalTranscript, onPartialTranscript) {
@@ -223,6 +252,7 @@ function createSpeechSession(ws, profile, streamSid) {
     streamSid,
     sttReady: false,
     currentSpeechToken: 0,
+    allowBargeIn: false,
     playbackQueue: Promise.resolve(),
     memory: profile.createMemory ? profile.createMemory() : {}
   };
@@ -259,6 +289,7 @@ function createSpeechSession(ws, profile, streamSid) {
       return;
     }
 
+    let loggedFirstChunk = false;
     for (const chunk of chunkBuffer(audio, 160)) {
       if (token !== session.currentSpeechToken) {
         log(session.scope, 'speech cancelled mid playback');
@@ -266,11 +297,15 @@ function createSpeechSession(ws, profile, streamSid) {
       }
 
       sendMediaChunk(chunk);
+      if (!loggedFirstChunk) {
+        log(session.scope, 'first outbound audio chunk sent', { bytes: chunk.length });
+        loggedFirstChunk = true;
+      }
       await delay(20);
     }
   };
 
-  const enqueueResponses = (responses) => {
+  const enqueueResponses = (responses, options = {}) => {
     if (!responses || responses.length === 0) {
       log(session.scope, 'no responses queued');
       return;
@@ -278,7 +313,12 @@ function createSpeechSession(ws, profile, streamSid) {
 
     session.currentSpeechToken += 1;
     const token = session.currentSpeechToken;
-    log(session.scope, 'queueing responses', { count: responses.length, token });
+    const initial = Boolean(options.initial);
+    if (initial) {
+      session.allowBargeIn = false;
+    }
+
+    log(session.scope, 'queueing responses', { count: responses.length, token, initial });
 
     session.playbackQueue = session.playbackQueue
       .then(async () => {
@@ -289,6 +329,11 @@ function createSpeechSession(ws, profile, streamSid) {
           }
 
           await speak(response, token);
+        }
+
+        if (initial) {
+          session.allowBargeIn = true;
+          log(session.scope, 'initial prompt complete, barge-in enabled');
         }
       })
       .catch((error) => {
@@ -324,7 +369,7 @@ function createSpeechSession(ws, profile, streamSid) {
   };
 
   const stt = connectToSarvamStt(session, profile, handleTranscript, () => {
-    if (session.currentSpeechToken > 0) {
+    if (session.allowBargeIn && session.currentSpeechToken > 0) {
       log(session.scope, 'barge-in detected, stopping speech');
       stopSpeech();
     }
@@ -338,12 +383,6 @@ function createSpeechSession(ws, profile, streamSid) {
       return;
     }
 
-    log(session.scope, 'received Twilio websocket event', {
-      event: message.event,
-      streamSid: message.streamSid || message.start?.streamSid || null,
-      payloadBytes: message.media?.payload ? message.media.payload.length : 0
-    });
-
     switch (message.event) {
       case 'start':
         session.streamSid = message.start?.streamSid || session.streamSid;
@@ -352,20 +391,14 @@ function createSpeechSession(ws, profile, streamSid) {
           streamSid: session.streamSid || null,
           customParameters: message.start?.customParameters || null
         });
-        enqueueResponses(profile.initialResponses({ memory: session.memory, formatNumberWord }));
+        enqueueResponses(profile.initialResponses({ memory: session.memory, formatNumberWord }), { initial: true });
         break;
       case 'media':
         if (message.media?.payload && stt.readyState === WebSocket.OPEN) {
-          log(session.scope, 'forwarding media to Sarvam STT', { bytes: message.media.payload.length });
           stt.send(JSON.stringify({
             event: 'audio_input',
             audio: message.media.payload
           }));
-        } else {
-          log(session.scope, 'skipped forwarding media', {
-            hasPayload: Boolean(message.media?.payload),
-            sttReadyState: stt.readyState
-          });
         }
         break;
       case 'stop':
@@ -375,6 +408,10 @@ function createSpeechSession(ws, profile, streamSid) {
         ws.close();
         break;
       default:
+        log(session.scope, 'received Twilio websocket event', {
+          event: message.event,
+          streamSid: message.streamSid || message.start?.streamSid || null
+        });
         break;
     }
   });
