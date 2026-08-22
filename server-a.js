@@ -85,7 +85,9 @@ startVoiceServer({
         languageCode: 'en-IN',
         speaker: 'shubh',
         pace: 0.84,
-        temperature: 0.64
+        temperature: 0.64,
+        pauseBeforeMs: 5000,
+        pauseAfterMs: 5000
       });
       return responses;
     }

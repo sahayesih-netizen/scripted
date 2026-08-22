@@ -282,6 +282,10 @@ function createSpeechSession(ws, profile, streamSid) {
   };
 
   const speak = async (response, token) => {
+    if (response.pauseBeforeMs) {
+      await delay(response.pauseBeforeMs);
+    }
+
     log(session.scope, 'speaking response', { text: safePreview(response.text) });
     const audio = await synthesizeSpeech(response);
     if (token !== session.currentSpeechToken) {
@@ -302,6 +306,10 @@ function createSpeechSession(ws, profile, streamSid) {
         loggedFirstChunk = true;
       }
       await delay(20);
+    }
+
+    if (response.pauseAfterMs) {
+      await delay(response.pauseAfterMs);
     }
   };
 
@@ -345,6 +353,7 @@ function createSpeechSession(ws, profile, streamSid) {
 
   const handleTranscript = (text) => {
     const normalized = normalizeText(text);
+
     if (!normalized) {
       log(session.scope, 'ignored empty transcript');
       return;

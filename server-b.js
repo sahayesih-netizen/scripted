@@ -29,7 +29,9 @@ startVoiceServer({
         languageCode: 'en-IN',
         speaker: 'shubh',
         pace: 0.86,
-        temperature: 0.62
+        temperature: 0.62,
+        pauseBeforeMs: 5000,
+        pauseAfterMs: 5000
       });
       return responses;
     }
@@ -43,7 +45,8 @@ startVoiceServer({
           languageCode: 'en-IN',
           speaker: 'shubh',
           pace: 0.88,
-          temperature: 0.65
+          temperature: 0.65,
+          pauseAfterMs: 5000
         },
         {
           text: 'And your son’s interview... how did it go?',
